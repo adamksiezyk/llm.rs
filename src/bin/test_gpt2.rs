@@ -21,10 +21,15 @@ fn main() {
         tiny_stories_val
     };
     let tokenizer = Tokenizer::new("gpt2_tokenizer.bin");
-    dbg!(tokenizer.token_table);
     let mut train_loader = DataLoader::new(train_tokens.to_str().unwrap());
-    let batch = train_loader.next_batch();
-    dbg!(batch);
+    let sentence = train_loader
+        .next_batch()
+        .iter()
+        .filter_map(|t| tokenizer.decode(*t).ok())
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join("");
+    println!("{sentence}");
 }
 
 trait FromBytes {
@@ -46,7 +51,7 @@ struct DataLoader {
     file_size: usize,
     current_position: usize,
     // output memory
-    batch: [i32; B * T + 1],
+    batch: [usize; B * T + 1],
     // convenience variables
     num_batches: usize,
 }
@@ -56,7 +61,7 @@ impl DataLoader {
         let file = File::open(filename).expect(&format!("Could not open file: '{filename}'"));
         let file_size = file.metadata().expect("Culd not read file metadata").len() as usize;
 
-        if file_size < (B * T + 1) * size_of::<i32>() {
+        if file_size < (B * T + 1) * size_of::<u32>() {
             panic!("Error: file size is too small for the batch size and sequence length");
         }
 
@@ -64,7 +69,7 @@ impl DataLoader {
             tokens_file: file,
             file_size,
             current_position: 0,
-            num_batches: file_size / (B * T * size_of::<i32>()),
+            num_batches: file_size / (B * T * size_of::<u32>()),
             batch: [0; B * T + 1],
         }
     }
@@ -73,19 +78,20 @@ impl DataLoader {
         self.current_position = 0;
     }
 
-    fn next_batch<'a>(&'a mut self) -> &'a [i32; B * T + 1] {
+    fn next_batch<'a>(&'a mut self) -> &'a [usize; B * T + 1] {
         // if we are at the end of the file, loop back to the beginning
-        if self.current_position + (B * T + 1) * size_of::<i32>() > self.file_size {
+        if self.current_position + (B * T + 1) * size_of::<u32>() > self.file_size {
             self.current_position = 0;
         }
 
-        let mut buf = [0u8; (B * T + 1) * size_of::<i32>()];
+        let mut buf = [0u8; (B * T + 1) * size_of::<u32>()];
         self.tokens_file
             .read(&mut buf)
             .expect("Error while reading batch from file");
         for i in 0..(B * T + 1) {
             self.batch[i] =
-                i32::from_le_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]]);
+                u32::from_le_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]])
+                    as usize;
         }
         &self.batch
     }
@@ -102,7 +108,7 @@ impl Tokenizer {
 
         // read in the header
         let mut header_bytes = [0u8; 1024];
-        file.read(&mut header_bytes);
+        file.read(&mut header_bytes).unwrap();
         let mut header = [0u32; 256];
         for i in 0..256 {
             header[i] = u32::from_le_bytes([
@@ -116,24 +122,33 @@ impl Tokenizer {
         assert!(header[1] == 1);
         let vocab_size = header[2] as usize;
         // read in all the tokens
-        let mut length = [0u8; 1];
+        let mut length_buff = [0u8; 1];
         let mut token_table = Vec::<String>::new();
         for i in 0..vocab_size {
-            file.read(&mut length);
-            let mut buff = vec![0u8; length[0] as usize];
-            file.read(&mut buff);
-            // let mut null_termiator = [0u8; 1];
-            // '\0'.encode_utf8(&mut null_termiator);
-            // buff.extend(null_termiator);
-            dbg!(&buff);
-            // TODO change to UTF-16
-            let token = String::from_utf8(buff).unwrap();
+            file.read(&mut length_buff).unwrap();
+            let len: usize = length_buff[0] as usize;
+
+            let mut buff = vec![0u8; len];
+            file.read(&mut buff).unwrap();
+            let mut buff_u16 = vec![0u16; len];
+            for i in 0..len {
+                buff_u16[i] = buff[i] as u16;
+            }
+            let token = String::from_utf16(&buff_u16).unwrap();
             token_table.insert(i, token);
         }
 
         Tokenizer {
             vocab_size,
             token_table,
+        }
+    }
+
+    fn decode(&self, token_id: usize) -> Result<&str, &'static str> {
+        if token_id < self.vocab_size {
+            Ok(&self.token_table[token_id as usize])
+        } else {
+            Err("Invalid token: {}")
         }
     }
 }
