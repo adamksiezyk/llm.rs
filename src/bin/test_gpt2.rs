@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, mem::size_of, path::Path, usize};
+use std::{collections::HashMap, fs::File, io::Read, mem::size_of, path::Path, usize};
 
 // hyperparameters
 const B: usize = 4; // batch size 4 (i.e. 4 independent token sequences will be trained on)
@@ -32,36 +32,31 @@ fn main() {
     println!("{sentence}");
 }
 
-trait FromBytes {
-    fn from_le_bytes(buff: [u8; 4]) -> Self;
-}
+fn read_u32(file: &mut File, size: usize) -> Vec<u32> {
+    let mut buffer = vec![0u8; size * size_of::<u32>()];
+    file.read(&mut buffer).unwrap();
 
-fn buffer_to_type<R: FromBytes, const SIZE: usize, const COUNT: usize>(
-    buff: &[u8],
-    out: &mut [R; COUNT],
-) {
-    for (i, chunk) in buff.chunks(SIZE).enumerate() {
-        out[i] = R::from_le_bytes(chunk.try_into().unwrap());
-    }
+    buffer
+        .chunks_exact(size_of::<u32>())
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>()
 }
 
 struct DataLoader {
     // input handling and its state
     tokens_file: File,
-    file_size: usize,
-    current_position: usize,
-    // output memory
-    batch: [usize; B * T + 1],
+    file_size: u64,
+    current_position: u64,
     // convenience variables
-    num_batches: usize,
+    num_batches: u64,
 }
 
 impl DataLoader {
     fn new(filename: &str) -> DataLoader {
         let file = File::open(filename).expect(&format!("Could not open file: '{filename}'"));
-        let file_size = file.metadata().expect("Culd not read file metadata").len() as usize;
+        let file_size = file.metadata().expect("Culd not read file metadata").len();
 
-        if file_size < (B * T + 1) * size_of::<u32>() {
+        if file_size < ((B * T + 1) * size_of::<u32>()) as u64 {
             panic!("Error: file size is too small for the batch size and sequence length");
         }
 
@@ -69,37 +64,26 @@ impl DataLoader {
             tokens_file: file,
             file_size,
             current_position: 0,
-            num_batches: file_size / (B * T * size_of::<u32>()),
-            batch: [0; B * T + 1],
+            num_batches: file_size / (B * T * size_of::<u32>()) as u64,
         }
     }
 
-    fn reset(&mut self) {
-        self.current_position = 0;
-    }
-
-    fn next_batch<'a>(&'a mut self) -> &'a [usize; B * T + 1] {
+    fn next_batch(&mut self) -> [u32; B * T + 1] {
         // if we are at the end of the file, loop back to the beginning
-        if self.current_position + (B * T + 1) * size_of::<u32>() > self.file_size {
+        if self.current_position + ((B * T + 1) * size_of::<u32>()) as u64 > self.file_size {
             self.current_position = 0;
         }
 
-        let mut buf = [0u8; (B * T + 1) * size_of::<u32>()];
-        self.tokens_file
-            .read(&mut buf)
-            .expect("Error while reading batch from file");
-        for i in 0..(B * T + 1) {
-            self.batch[i] =
-                u32::from_le_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]])
-                    as usize;
-        }
-        &self.batch
+        self.current_position += (B * T * size_of::<u32>()) as u64;
+        read_u32(&mut self.tokens_file, B * T + 1)
+            .try_into()
+            .expect("Error while reading batch from file")
     }
 }
 
 struct Tokenizer {
-    vocab_size: usize,
-    token_table: Vec<String>,
+    vocab_size: u32,
+    token_table: HashMap<u32, String>,
 }
 
 impl Tokenizer {
@@ -107,33 +91,18 @@ impl Tokenizer {
         let mut file = File::open(filename).expect(&format!("Could not open file: '{filename}'"));
 
         // read in the header
-        let mut header_bytes = [0u8; 1024];
-        file.read(&mut header_bytes).unwrap();
-        let mut header = [0u32; 256];
-        for i in 0..256 {
-            header[i] = u32::from_le_bytes([
-                header_bytes[i * 4],
-                header_bytes[i * 4 + 1],
-                header_bytes[i * 4 + 2],
-                header_bytes[i * 4 + 3],
-            ]);
-        }
+        let header = read_u32(&mut file, 256);
         assert!(header[0] == 20240328);
         assert!(header[1] == 1);
-        let vocab_size = header[2] as usize;
+        let vocab_size = header[2];
         // read in all the tokens
         let mut length_buff = [0u8; 1];
-        let mut token_table = Vec::<String>::new();
+        let mut token_table = HashMap::<u32, String>::new();
         for i in 0..vocab_size {
             file.read(&mut length_buff).unwrap();
-            let len: usize = length_buff[0] as usize;
-
-            let mut buff = vec![0u8; len];
+            let mut buff = vec![0u8; length_buff[0] as usize];
             file.read(&mut buff).unwrap();
-            let mut buff_u16 = vec![0u16; len];
-            for i in 0..len {
-                buff_u16[i] = buff[i] as u16;
-            }
+            let buff_u16 = buff.iter().map(|t| *t as u16).collect::<Vec<_>>();
             let token = String::from_utf16(&buff_u16).unwrap();
             token_table.insert(i, token);
         }
@@ -144,11 +113,11 @@ impl Tokenizer {
         }
     }
 
-    fn decode(&self, token_id: usize) -> Result<&str, &'static str> {
+    fn decode(&self, token_id: u32) -> Result<&str, &'static str> {
         if token_id < self.vocab_size {
-            Ok(&self.token_table[token_id as usize])
+            Ok(&self.token_table[&token_id])
         } else {
-            Err("Invalid token: {}")
+            Err("Invalid token")
         }
     }
 }
