@@ -1,4 +1,11 @@
-use std::{collections::HashMap, fs::File, io::Read, mem::size_of, path::Path, usize};
+use std::{
+    collections::HashMap,
+    fs::File,
+    io::Read,
+    mem::{size_of, take},
+    path::Path,
+    usize,
+};
 
 // hyperparameters
 const B: usize = 4; // batch size 4 (i.e. 4 independent token sequences will be trained on)
@@ -23,7 +30,7 @@ fn main() {
         tiny_stories_val
     };
     let tokenizer = Tokenizer::new("gpt2_tokenizer.bin");
-    let mut train_loader = DataLoader::new(train_tokens.to_str().unwrap());
+    let mut train_loader = DataLoader::new(train_tokens.to_str().unwrap(), B, T);
     // let sentence = train_loader
     //     .next_batch()
     //     .iter()
@@ -67,6 +74,9 @@ fn read_f32(file: &mut File, size: usize) -> Vec<f32> {
 }
 
 struct DataLoader {
+    // hyperparameters
+    b: usize,
+    t: usize,
     // input handling and its state
     tokens_file: File,
     file_size: u64,
@@ -76,30 +86,34 @@ struct DataLoader {
 }
 
 impl DataLoader {
-    fn new(filename: &str) -> DataLoader {
+    fn new(filename: &str, b: usize, t: usize) -> DataLoader {
         let file = File::open(filename).expect(&format!("Could not open file: '{filename}'"));
         let file_size = file.metadata().expect("Culd not read file metadata").len();
 
-        if file_size < ((B * T + 1) * size_of::<u32>()) as u64 {
+        if file_size < ((b * t + 1) * size_of::<u32>()) as u64 {
             panic!("Error: file size is too small for the batch size and sequence length");
         }
 
         DataLoader {
+            b,
+            t,
             tokens_file: file,
             file_size,
             current_position: 0,
-            num_batches: file_size / (B * T * size_of::<u32>()) as u64,
+            num_batches: file_size / (b * t * size_of::<u32>()) as u64,
         }
     }
 
-    fn next_batch(&mut self) -> [u32; B * T + 1] {
+    fn next_batch(&mut self) -> Vec<u32> {
         // if we are at the end of the file, loop back to the beginning
-        if self.current_position + ((B * T + 1) * size_of::<u32>()) as u64 > self.file_size {
+        if self.current_position + ((self.b * self.t + 1) * size_of::<u32>()) as u64
+            > self.file_size
+        {
             self.current_position = 0;
         }
 
-        self.current_position += (B * T * size_of::<u32>()) as u64;
-        read_u32(&mut self.tokens_file, B * T + 1)
+        self.current_position += (self.b * self.t * size_of::<u32>()) as u64;
+        read_u32(&mut self.tokens_file, self.b * self.t + 1)
             .try_into()
             .expect("Error while reading batch from file")
     }
@@ -377,5 +391,63 @@ impl GPT2 {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_data_loader_first_batch() {
+        let mut data_loader = DataLoader::new("data/tiny_shakespeare_train.bin", 1, 32);
+        let batch = data_loader.next_batch();
+        let expected = [
+            9203, 262, 39418, 13, 628, 50256, 22747, 49208, 805, 25, 198, 9203, 262, 39418, 0, 628,
+            50256, 44879, 40, 3535, 1565, 2937, 25, 198, 42012, 13, 628, 50256, 22747, 49208, 805,
+            25, 198,
+        ];
+        assert_eq!(batch, expected);
+    }
+
+    #[test]
+    fn test_data_loader_second_batch() {
+        let mut data_loader = DataLoader::new("data/tiny_shakespeare_train.bin", 1, 32);
+        let _ = data_loader.next_batch();
+        let batch = data_loader.next_batch();
+        let expected = [
+            8496, 338, 326, 30, 628, 50256, 44879, 40, 3535, 1565, 2937, 25, 198, 40, 6, 262, 1748,
+            286, 479, 2737, 290, 269, 8516, 13, 628, 50256, 22747, 49208, 805, 25, 198, 40, 6,
+        ];
+        assert_eq!(batch, expected);
+    }
+
+    #[test]
+    fn test_tokenizer_decode() {
+        let tokenizer = Tokenizer::new("gpt2_tokenizer.bin");
+        let inputs = [
+            9203u32, 262, 39418, 13, 628, 50256, 22747, 49208, 805, 25, 198, 9203, 262, 39418, 0,
+            628, 50256, 44879, 40, 3535, 1565, 2937, 25, 198, 42012, 13, 628, 50256, 22747, 49208,
+            805, 25, 198, 8496, 338, 326, 30, 628, 50256,
+        ];
+        let tokens = inputs
+            .iter()
+            .filter_map(|t| tokenizer.decode(*t).ok())
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        let expected = "Under the canopy.
+
+<|endoftext|>Third Servingman:
+Under the canopy!
+
+<|endoftext|>CORIOLANUS:
+Ay.
+
+<|endoftext|>Third Servingman:
+Where's that?
+
+<|endoftext|>";
+        assert_eq!(tokens, expected);
     }
 }
