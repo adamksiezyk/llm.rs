@@ -311,8 +311,10 @@ struct GPT2<'a> {
     v_memory: Vec<f32>,
     // the activations of the model, and their sizes
     acts: ActivationTensors<'a>,
+    acts_memory: Vec<f32>,
     // gradients of the activations
     grads_acts: ActivationTensors<'a>,
+    grads_acts_memory: Vec<f32>,
     // other run state configuration
     batch_size: u32,   // the batch size (B) of current forward pass
     seq_len: u32,      // the sequence length (T) of current forward pass
@@ -406,10 +408,10 @@ impl<'a> GPT2<'a> {
         let num_activations: usize = act_sizes.iter().sum();
 
         // activations
-        let mut act_memory = vec![0f32; num_activations];
-        let act_memory_slice =
-            unsafe { std::slice::from_raw_parts_mut(act_memory.as_mut_ptr(), act_memory.len()) };
-        let acts = ActivationTensors::new(act_memory_slice, &act_sizes);
+        let mut acts_memory = vec![0f32; num_activations];
+        let acts_memory_slice =
+            unsafe { std::slice::from_raw_parts_mut(acts_memory.as_mut_ptr(), acts_memory.len()) };
+        let acts = ActivationTensors::new(acts_memory_slice, &act_sizes);
 
         // activations gradients
         let mut grads_acts_memory = vec![0f32; num_activations];
@@ -431,7 +433,9 @@ impl<'a> GPT2<'a> {
             v_memory: vec![],
             //// the activations of the model, and their sizes
             acts,
+            acts_memory,
             grads_acts,
+            grads_acts_memory,
             seq_len: t as u32,
             batch_size: b as u32,
             inputs: vec![],
@@ -798,8 +802,7 @@ fn softmax_forward(probs: &mut [f32], logits: &[f32], b: usize, t: usize, v: usi
                 probs_bt[i] = f32::exp(logits_bt[i] - maxval);
                 sum += probs_bt[i];
             }
-            let idx = i_b * t * v + i_t * v;
-            for i in idx..idx + v {
+            for i in 0..v {
                 probs_bt[i] /= sum;
             }
         }
