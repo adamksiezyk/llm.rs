@@ -43,12 +43,24 @@ fn main() {
     println!("channels: {}", gpt2.config.channels);
     println!("num_parameters: {}", gpt2.num_parameters);
 
-    gpt2.forward(&input_tokens, B, T);
-    let probs = gpt2.acts.probs;
-    let coin = rand::random::<f32>();
-    let next_token = sample_mult(probs, gpt2.config.vocab_size, coin);
-    let token_str = tokenizer.decode(next_token as u32).unwrap();
-    println!("{}", token_str);
+    let mut input_tokens_2 = input_tokens.clone();
+    let mut gen_tokens = Vec::new();
+    for _ in 1..T {
+        println!("Generating token {} of {}", gen_tokens.len() + 1, T);
+        gpt2.forward(&input_tokens_2, B, T);
+        let probs = &gpt2.acts.probs;
+        let coin = rand::random::<f32>();
+        let next_token = sample_mult(probs, gpt2.config.vocab_size, coin);
+        input_tokens_2.push(next_token as u32);
+        gen_tokens.push(next_token as u32);
+        let gen_str = &gen_tokens
+            .iter()
+            .filter_map(|t| tokenizer.decode(*t).ok())
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        println!("{}", gen_str);
+    }
 }
 
 fn read_u32(file: &mut File, size: usize) -> Vec<u32> {
